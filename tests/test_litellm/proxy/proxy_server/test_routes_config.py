@@ -903,8 +903,10 @@ def test_redact_callback_env_vars_helper_handles_none_and_non_secret_keys():
     """Direct test on the redaction helper: secret-named keys with values
     become 'REDACTED', null values pass through (so an unset env var stays
     null in the UI rather than being mis-labelled as a stored secret),
-    non-secret keys stay verbatim, and the explicit *_HEADERS allowlist
-    catches keys the segment matcher misses."""
+    non-secret keys stay verbatim, and the explicit allowlist catches the
+    secret-bearing keys the segment matcher misses (Authorization-style
+    headers, GCS service-account paths, the SMTP username half of the
+    credential pair)."""
     from litellm.proxy import proxy_server as ps
 
     out = ps._redact_callback_env_vars(
@@ -913,6 +915,8 @@ def test_redact_callback_env_vars_helper_handles_none_and_non_secret_keys():
             "LANGFUSE_HOST": "https://cloud.langfuse.com",
             "DD_API_KEY": None,
             "GENERIC_LOGGER_HEADERS": "Authorization=Bearer x",
+            "GCS_PATH_SERVICE_ACCOUNT": "/etc/secrets/gcs.json",
+            "SMTP_USERNAME": "smtp-user-1234",
         }
     )
     assert out == {
@@ -920,7 +924,77 @@ def test_redact_callback_env_vars_helper_handles_none_and_non_secret_keys():
         "LANGFUSE_HOST": "https://cloud.langfuse.com",
         "DD_API_KEY": None,
         "GENERIC_LOGGER_HEADERS": "REDACTED",
+        "GCS_PATH_SERVICE_ACCOUNT": "REDACTED",
+        "SMTP_USERNAME": "REDACTED",
     }
+
+
+def test_get_config_callbacks_redacts_email_alerting_vars_for_view_only_admin(
+    client, auth_as, mock_prisma, monkeypatch
+):
+    """The email alerting block lives in the same response as the callback
+    block and the Slack webhook block, so it must follow the same role gate.
+    SMTP_PASSWORD is plainly secret; SMTP_USERNAME is the second half of the
+    SMTP credential pair (knowing it narrows brute-force attempts against the
+    relay). Both come back as 'REDACTED' for a view-only admin while non-secret
+    routing fields (SMTP_HOST, SMTP_PORT, SMTP_SENDER_EMAIL, ...) stay visible.
+    A full PROXY_ADMIN still sees the underlying password (mask_sensitive_keys
+    keeps a partial-asterisk mask) and the username verbatim, so the edit form
+    can round-trip on save."""
+    from litellm.proxy import proxy_server as ps
+    from litellm.proxy._types import LitellmUserRoles
+
+    _install_litellm_config(mock_prisma)
+    monkeypatch.setattr(ps, "prisma_client", mock_prisma)
+    monkeypatch.setattr(ps, "llm_router", None)
+
+    fake_proxy_config = MagicMock()
+    fake_proxy_config.get_config = AsyncMock(
+        return_value={
+            "litellm_settings": {"success_callback": []},
+            "general_settings": {"alerting": ["email"]},
+            "environment_variables": {
+                "SMTP_HOST": "smtp.resend.com",
+                "SMTP_PORT": "587",
+                "SMTP_USERNAME": "smtp-user-VERIA440",
+                "SMTP_PASSWORD": "smtp-password-VERIA440-SECRET",
+                "SMTP_SENDER_EMAIL": "alerts@example.com",
+                "TEST_EMAIL_ADDRESS": "admin@example.com",
+                "EMAIL_LOGO_URL": "https://example.com/logo.png",
+                "EMAIL_SUPPORT_CONTACT": "support@example.com",
+            },
+        }
+    )
+    monkeypatch.setattr(ps, "proxy_config", fake_proxy_config)
+
+    def _email_block(body):
+        return next(a for a in body["alerts"] if a["name"] == "email")
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY):
+        view_resp = client.get("/get/config/callbacks")
+    assert view_resp.status_code == 200
+    # The username + password fixture values must not appear anywhere in the
+    # response — partial-mask leaves a prefix/suffix that this assertion
+    # would catch if the redaction silently flipped back to mask_sensitive_keys.
+    for secret in ("smtp-user-VERIA440", "smtp-password-VERIA440-SECRET"):
+        assert secret not in view_resp.text
+    view_email = _email_block(view_resp.json())["variables"]
+    assert view_email["SMTP_PASSWORD"] == "REDACTED"
+    assert view_email["SMTP_USERNAME"] == "REDACTED"
+    assert view_email["SMTP_HOST"] == "smtp.resend.com"
+    assert view_email["SMTP_PORT"] == "587"
+    assert view_email["SMTP_SENDER_EMAIL"] == "alerts@example.com"
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN):
+        admin_resp = client.get("/get/config/callbacks")
+    assert admin_resp.status_code == 200
+    admin_email = _email_block(admin_resp.json())["variables"]
+    # Full admin sees the username verbatim; the password keeps the existing
+    # mask_sensitive_keys partial mask (the underlying value is preserved
+    # well enough for the edit form to detect a no-change save).
+    assert admin_email["SMTP_USERNAME"] == "smtp-user-VERIA440"
+    assert admin_email["SMTP_PASSWORD"] != "REDACTED"
+    assert admin_email["SMTP_HOST"] == "smtp.resend.com"
 
 
 # ---------------------------------------------------------------------------

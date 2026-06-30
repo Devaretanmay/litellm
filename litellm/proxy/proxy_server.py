@@ -14205,13 +14205,21 @@ def _redact_general_setting_value(field_name: str, value: JsonValue, is_full_adm
     return value
 
 
-# Authorization-style headers always carry the auth token for the upstream
-# collector but the segment-keyword masker on the env var name does not catch
-# them. Listed here so /get/config/callbacks redacts them for non-admin viewers
+# Callback env vars whose names the segment-keyword masker on
+# SENSITIVE_DATA_MASKER misses, but whose values are credential-bearing.
+# OTEL_HEADERS / GENERIC_LOGGER_HEADERS carry the Authorization bearer for the
+# upstream collector. GCS_PATH_SERVICE_ACCOUNT mirrors
+# litellm.proxy.common_utils.callback_utils._EXTRA_SENSITIVE_CALLBACK_KEYS so
+# this redaction stays in sync with the encryption path if a GCS-backed
+# callback is ever wired into AllCallbacks.litellm_callback_params.
+# SMTP_USERNAME is half of an SMTP credential pair and is reused by this
+# helper from the email alerting block
 _EXTRA_SECRET_CALLBACK_ENV_VARS: frozenset[str] = frozenset(
     {
         "OTEL_HEADERS",
         "GENERIC_LOGGER_HEADERS",
+        "GCS_PATH_SERVICE_ACCOUNT",
+        "SMTP_USERNAME",
     }
 )
 
@@ -14740,7 +14748,10 @@ async def get_config(
             "EMAIL_SUPPORT_CONTACT",
         ]
         _email_env_vars = {_var: environment_variables.get(_var) for _var in _email_vars}
-        _email_env_vars = mask_sensitive_keys(_email_env_vars, _ALERTING_SENSITIVE_VARS)
+        if is_full_admin:
+            _email_env_vars = mask_sensitive_keys(_email_env_vars, _ALERTING_SENSITIVE_VARS)
+        else:
+            _email_env_vars = _redact_callback_env_vars(_email_env_vars)
 
         alerting_data.append(
             {
