@@ -741,6 +741,188 @@ def test_get_config_callbacks_internal_error(client, auth_as, mock_prisma, monke
     )
 
 
+# Shared helpers for the VERIA-440 view-only-admin redaction tests below.
+_CALLBACK_ENV_FIXTURE = {
+    "LANGFUSE_PUBLIC_KEY": "pk-public-1234567890",
+    "LANGFUSE_SECRET_KEY": "sk-langfuse-super-secret",
+    "LANGFUSE_HOST": "https://cloud.langfuse.com",
+    "DD_API_KEY": "dd-super-secret-api-key",
+    "DD_SITE": "datadoghq.com",
+    "OTEL_HEADERS": "Authorization=Bearer otel-super-secret",
+    "OTEL_ENDPOINT": "https://otlp.example.com",
+}
+
+
+def _install_callbacks_config(monkeypatch, mock_prisma):
+    """Install the proxy globals /get/config/callbacks reads from with a
+    deterministic success_callback list and a populated environment_variables
+    dict, so the response actually exercises the env-var redaction path."""
+    from litellm.proxy import proxy_server as ps
+
+    _install_litellm_config(mock_prisma)
+    monkeypatch.setattr(ps, "prisma_client", mock_prisma)
+    monkeypatch.setattr(ps, "llm_router", None)
+
+    fake_proxy_config = MagicMock()
+    fake_proxy_config.get_config = AsyncMock(
+        return_value={
+            "litellm_settings": {"success_callback": ["langfuse", "datadog", "otel"]},
+            "general_settings": {"alerting": ["slack"]},
+            "environment_variables": dict(_CALLBACK_ENV_FIXTURE),
+        }
+    )
+    monkeypatch.setattr(ps, "proxy_config", fake_proxy_config)
+
+
+def _callback_variables(body: dict, name: str) -> dict:
+    return next(
+        cb["variables"] for cb in body["callbacks"] if cb["name"] == name
+    )
+
+
+def test_get_config_callbacks_redacts_secret_env_vars_for_view_only_admin(
+    client, auth_as, mock_prisma, monkeypatch
+):
+    """A view-only admin reading /get/config/callbacks must not receive
+    decrypted callback env vars — possessing LANGFUSE_SECRET_KEY / DD_API_KEY /
+    OTEL_HEADERS is equivalent to holding the upstream credential. The
+    credential-bearing leaves come back as 'REDACTED'; non-secret routing
+    fields (LANGFUSE_HOST, DD_SITE, OTEL_ENDPOINT) stay visible so the UI
+    can still show which integration is wired up."""
+    from litellm.proxy._types import LitellmUserRoles
+
+    _install_callbacks_config(monkeypatch, mock_prisma)
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY):
+        response = client.get("/get/config/callbacks")
+    assert response.status_code == 200
+    body = response.json()
+
+    # The raw secret values must not appear anywhere in the rendered response —
+    # not in the callback block, not echoed under the alerting block, nowhere.
+    for secret in (
+        _CALLBACK_ENV_FIXTURE["LANGFUSE_SECRET_KEY"],
+        _CALLBACK_ENV_FIXTURE["DD_API_KEY"],
+        _CALLBACK_ENV_FIXTURE["OTEL_HEADERS"],
+        _CALLBACK_ENV_FIXTURE["LANGFUSE_PUBLIC_KEY"],
+    ):
+        assert secret not in response.text
+
+    langfuse_vars = _callback_variables(body, "langfuse")
+    assert langfuse_vars["LANGFUSE_PUBLIC_KEY"] == "REDACTED"
+    assert langfuse_vars["LANGFUSE_SECRET_KEY"] == "REDACTED"
+    # Non-secret routing field stays visible.
+    assert langfuse_vars["LANGFUSE_HOST"] == _CALLBACK_ENV_FIXTURE["LANGFUSE_HOST"]
+
+    datadog_vars = _callback_variables(body, "datadog")
+    assert datadog_vars["DD_API_KEY"] == "REDACTED"
+    assert datadog_vars["DD_SITE"] == _CALLBACK_ENV_FIXTURE["DD_SITE"]
+
+    otel_vars = _callback_variables(body, "otel")
+    # OTEL_HEADERS' name does not match the segment-keyword masker, but the
+    # value is an Authorization header — the extra-secret allowlist must catch
+    # it. If a future refactor drops OTEL_HEADERS from the allowlist this test
+    # flips red, surfacing the silent regression.
+    assert otel_vars["OTEL_HEADERS"] == "REDACTED"
+    assert otel_vars["OTEL_ENDPOINT"] == _CALLBACK_ENV_FIXTURE["OTEL_ENDPOINT"]
+
+
+def test_get_config_callbacks_full_admin_still_sees_secret_env_vars(
+    client, auth_as, mock_prisma, monkeypatch
+):
+    """The redaction must not over-redact for a full PROXY_ADMIN — the edit
+    form needs the real credential values to round-trip on save without the
+    UI silently overwriting stored credentials with the string 'REDACTED'."""
+    from litellm.proxy._types import LitellmUserRoles
+
+    _install_callbacks_config(monkeypatch, mock_prisma)
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN):
+        response = client.get("/get/config/callbacks")
+    assert response.status_code == 200
+    body = response.json()
+
+    langfuse_vars = _callback_variables(body, "langfuse")
+    assert langfuse_vars["LANGFUSE_SECRET_KEY"] == _CALLBACK_ENV_FIXTURE["LANGFUSE_SECRET_KEY"]
+    assert langfuse_vars["LANGFUSE_PUBLIC_KEY"] == _CALLBACK_ENV_FIXTURE["LANGFUSE_PUBLIC_KEY"]
+
+    datadog_vars = _callback_variables(body, "datadog")
+    assert datadog_vars["DD_API_KEY"] == _CALLBACK_ENV_FIXTURE["DD_API_KEY"]
+
+    otel_vars = _callback_variables(body, "otel")
+    assert otel_vars["OTEL_HEADERS"] == _CALLBACK_ENV_FIXTURE["OTEL_HEADERS"]
+
+
+def test_get_config_callbacks_redacts_slack_webhook_urls_for_view_only_admin(
+    client, auth_as, mock_prisma, monkeypatch
+):
+    """alert_to_webhook_url maps each alert type to a Slack incoming-webhook
+    URL — the URL itself IS the credential (anyone with the URL can post to
+    the channel). A view-only admin must not receive those URLs in plaintext;
+    a full admin still gets them so the edit form can round-trip. The
+    alert-type keys themselves are not secret and stay visible."""
+    from litellm.proxy import proxy_server as ps
+    from litellm.proxy._types import LitellmUserRoles
+
+    _install_callbacks_config(monkeypatch, mock_prisma)
+
+    webhooks = {
+        "spend_reports": "https://hooks.slack.com/services/T000/B000/SPEND-WEBHOOK-SECRET",
+        "budget_alerts": "https://hooks.slack.com/services/T000/B111/BUDGET-WEBHOOK-SECRET",
+    }
+    monkeypatch.setattr(
+        ps.proxy_logging_obj.slack_alerting_instance,
+        "alert_to_webhook_url",
+        webhooks,
+        raising=False,
+    )
+
+    def _slack_block(body):
+        return next(a for a in body["alerts"] if a["name"] == "slack")
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY):
+        view_resp = client.get("/get/config/callbacks")
+    assert view_resp.status_code == 200
+    # Neither webhook URL may appear anywhere in the response.
+    for url in webhooks.values():
+        assert url not in view_resp.text
+    view_alerts = _slack_block(view_resp.json())["alerts_to_webhook"]
+    assert view_alerts == {
+        "spend_reports": "REDACTED",
+        "budget_alerts": "REDACTED",
+    }
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN):
+        admin_resp = client.get("/get/config/callbacks")
+    assert admin_resp.status_code == 200
+    admin_alerts = _slack_block(admin_resp.json())["alerts_to_webhook"]
+    assert admin_alerts == webhooks
+
+
+def test_redact_callback_env_vars_helper_handles_none_and_non_secret_keys():
+    """Direct test on the redaction helper: secret-named keys with values
+    become 'REDACTED', null values pass through (so an unset env var stays
+    null in the UI rather than being mis-labelled as a stored secret),
+    non-secret keys stay verbatim, and the explicit *_HEADERS allowlist
+    catches keys the segment matcher misses."""
+    from litellm.proxy import proxy_server as ps
+
+    out = ps._redact_callback_env_vars(
+        {
+            "LANGFUSE_SECRET_KEY": "sk-leak",
+            "LANGFUSE_HOST": "https://cloud.langfuse.com",
+            "DD_API_KEY": None,
+            "GENERIC_LOGGER_HEADERS": "Authorization=Bearer x",
+        }
+    )
+    assert out == {
+        "LANGFUSE_SECRET_KEY": "REDACTED",
+        "LANGFUSE_HOST": "https://cloud.langfuse.com",
+        "DD_API_KEY": None,
+        "GENERIC_LOGGER_HEADERS": "REDACTED",
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET /config/yaml
 # ---------------------------------------------------------------------------

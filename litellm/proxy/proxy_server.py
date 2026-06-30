@@ -14205,6 +14205,40 @@ def _redact_general_setting_value(field_name: str, value: JsonValue, is_full_adm
     return value
 
 
+# Authorization-style headers always carry the auth token for the upstream
+# collector but the segment-keyword masker on the env var name does not catch
+# them. Listed here so /get/config/callbacks redacts them for non-admin viewers
+_EXTRA_SECRET_CALLBACK_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "OTEL_HEADERS",
+        "GENERIC_LOGGER_HEADERS",
+    }
+)
+
+
+def _redact_callback_env_vars(env_vars: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    """Replace credential-bearing env var values with "REDACTED" for non-admin
+    viewers.
+
+    /get/config/callbacks returns the proxy's decrypted environment_variables
+    keyed by callback (Langfuse, Langsmith, Datadog, ...). The credential-bearing
+    entries (``*_SECRET_KEY``, ``*_API_KEY``, ``*_PASSWORD``, ``*_TOKEN``, ...)
+    must never reach a PROXY_ADMIN_VIEW_ONLY caller, while non-secret routing
+    fields (``LANGFUSE_HOST``, ``DD_SITE``, ``LAGO_API_BASE``, ...) stay visible
+    so the UI can show which integration is configured. Null values pass
+    through unchanged.
+    """
+    return {
+        key: (
+            "REDACTED"
+            if value is not None
+            and (key in _EXTRA_SECRET_CALLBACK_ENV_VARS or SENSITIVE_DATA_MASKER.is_sensitive_key(key))
+            else value
+        )
+        for key, value in env_vars.items()
+    }
+
+
 @router.get(
     "/config/field/info",
     tags=["config.yaml"],
@@ -14596,7 +14630,9 @@ async def delete_callback(
     include_in_schema=False,
     dependencies=[Depends(user_api_key_auth)],
 )
-async def get_config():
+async def get_config(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
     """
     For Admin UI - allows admin to view config via UI
     # return the callbacks and the env variables for the callback
@@ -14610,6 +14646,12 @@ async def get_config():
         _litellm_settings = config_data.get("litellm_settings", {})
         _general_settings = config_data.get("general_settings", {})
         environment_variables = config_data.get("environment_variables", {})
+
+        # admin_viewer_routes exposes this route to PROXY_ADMIN_VIEW_ONLY, but the
+        # response carries decrypted callback env vars (LANGFUSE_SECRET_KEY, ...)
+        # and alert_to_webhook_url values (each itself a credential), so non-full
+        # admins get those redacted to match /config/field/info and /config/list
+        is_full_admin = user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN
 
         _success_callbacks = _litellm_settings.get("success_callback", [])
         _failure_callbacks = _litellm_settings.get("failure_callback", [])
@@ -14652,6 +14694,12 @@ async def get_config():
         for _callback in _success_and_failure_callbacks:
             _data_to_return.append(process_callback(_callback, "success_and_failure", environment_variables))
 
+        if not is_full_admin:
+            _data_to_return = [
+                {**entry, "variables": _redact_callback_env_vars(entry.get("variables") or {})}
+                for entry in _data_to_return
+            ]
+
         # Check if slack alerting is on
         _alerting = _general_settings.get("alerting", [])
         alerting_data = []
@@ -14668,6 +14716,10 @@ async def get_config():
             _alerting_types = proxy_logging_obj.slack_alerting_instance.alert_types
             _all_alert_types = proxy_logging_obj.slack_alerting_instance._all_possible_alert_types()
             _alerts_to_webhook = proxy_logging_obj.slack_alerting_instance.alert_to_webhook_url
+            # Each value is a Slack incoming-webhook URL (= the credential); keep
+            # the alert-type keys so the UI can still show which alerts are routed
+            if not is_full_admin and isinstance(_alerts_to_webhook, dict):
+                _alerts_to_webhook = {alert_type: "REDACTED" for alert_type in _alerts_to_webhook}
             alerting_data.append(
                 {
                     "name": "slack",
