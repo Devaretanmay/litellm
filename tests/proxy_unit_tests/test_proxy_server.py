@@ -2844,7 +2844,13 @@ async def test_get_config_callbacks_with_all_types(client_no_auth):
 async def test_get_config_callbacks_environment_variables(client_no_auth):
     """
     Test that /get/config/callbacks correctly includes environment variables
-    for each callback type. Values are returned as-is from the config (no decryption).
+    for each callback type.
+
+    client_no_auth runs with no master_key, so the auth dependency resolves the
+    caller as INTERNAL_USER (not PROXY_ADMIN). Per VERIA-440 the handler redacts
+    credential-bearing env values for any non-full-admin caller, so the secret
+    keys come back as "REDACTED" while non-secret routing fields (HOST,
+    ENDPOINT, ...) stay verbatim.
     """
     from litellm.proxy.proxy_server import ProxyConfig
 
@@ -2886,12 +2892,13 @@ async def test_get_config_callbacks_environment_variables(client_no_auth):
         assert langfuse_callback["type"] == "success"
         assert "variables" in langfuse_callback
 
-        # Verify langfuse env vars are present (values returned as-is, no decryption)
+        # Credential-bearing env vars are redacted for non-PROXY_ADMIN callers
+        # (VERIA-440); non-secret routing fields stay visible.
         langfuse_vars = langfuse_callback["variables"]
         assert "LANGFUSE_PUBLIC_KEY" in langfuse_vars
-        assert langfuse_vars["LANGFUSE_PUBLIC_KEY"] == "test-public-key"
+        assert langfuse_vars["LANGFUSE_PUBLIC_KEY"] == "REDACTED"
         assert "LANGFUSE_SECRET_KEY" in langfuse_vars
-        assert langfuse_vars["LANGFUSE_SECRET_KEY"] == "test-secret-key"
+        assert langfuse_vars["LANGFUSE_SECRET_KEY"] == "REDACTED"
         assert "LANGFUSE_HOST" in langfuse_vars
         assert langfuse_vars["LANGFUSE_HOST"] == "https://cloud.langfuse.com"
 
@@ -2901,14 +2908,16 @@ async def test_get_config_callbacks_environment_variables(client_no_auth):
         assert otel_callback["type"] == "success_and_failure"
         assert "variables" in otel_callback
 
-        # Verify otel env vars are present
+        # OTEL_HEADERS carries the Authorization bearer for the upstream
+        # collector, so it is redacted even though the segment-keyword masker
+        # does not catch the name on its own.
         otel_vars = otel_callback["variables"]
         assert "OTEL_EXPORTER" in otel_vars
         assert otel_vars["OTEL_EXPORTER"] == "otlp"
         assert "OTEL_ENDPOINT" in otel_vars
         assert otel_vars["OTEL_ENDPOINT"] == "http://localhost:4317"
         assert "OTEL_HEADERS" in otel_vars
-        assert otel_vars["OTEL_HEADERS"] == "key=value"
+        assert otel_vars["OTEL_HEADERS"] == "REDACTED"
 
 
 @pytest.mark.asyncio
