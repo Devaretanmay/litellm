@@ -844,7 +844,9 @@ def test_get_config_custom_callback_api_env_vars(monkeypatch):
 
     # Bypass auth dependency
     original_overrides = app.dependency_overrides.copy()
-    app.dependency_overrides[user_api_key_auth] = lambda: MagicMock()
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, api_key="sk-1234"
+    )
 
     client = TestClient(app)
     try:
@@ -898,7 +900,9 @@ def test_get_config_returns_email_settings(monkeypatch):
     monkeypatch.setattr(proxy_config, "get_config", AsyncMock(return_value=config_data))
 
     original_overrides = app.dependency_overrides.copy()
-    app.dependency_overrides[user_api_key_auth] = lambda: MagicMock()
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, api_key="sk-1234"
+    )
 
     client = TestClient(app)
     try:
@@ -955,7 +959,9 @@ def test_get_config_returns_slack_webhook(monkeypatch):
     monkeypatch.setattr(proxy_config, "get_config", AsyncMock(return_value=config_data))
 
     original_overrides = app.dependency_overrides.copy()
-    app.dependency_overrides[user_api_key_auth] = lambda: MagicMock()
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, api_key="sk-1234"
+    )
 
     client = TestClient(app)
     try:
@@ -1009,7 +1015,9 @@ def test_get_config_cleared_slack_webhook_not_overridden_by_os_env(monkeypatch):
     monkeypatch.setattr(proxy_config, "get_config", AsyncMock(return_value=config_data))
 
     original_overrides = app.dependency_overrides.copy()
-    app.dependency_overrides[user_api_key_auth] = lambda: MagicMock()
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, api_key="sk-1234"
+    )
 
     client = TestClient(app)
     try:
@@ -5153,7 +5161,9 @@ def test_get_config_normalizes_string_callbacks(monkeypatch):
     monkeypatch.setattr(proxy_config, "get_config", AsyncMock(return_value=config_data))
 
     original_overrides = app.dependency_overrides.copy()
-    app.dependency_overrides[user_api_key_auth] = lambda: MagicMock()
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN, api_key="sk-1234"
+    )
 
     client = TestClient(app)
     try:
