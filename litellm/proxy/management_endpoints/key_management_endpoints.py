@@ -563,7 +563,7 @@ def _check_allowed_routes_caller_permission(
 
 
 def _check_permissions_caller_permission(
-    permissions: Optional[dict],
+    data: GenerateRequestBase,
     user_api_key_dict: UserAPIKeyAuth,
 ) -> None:
     """
@@ -573,8 +573,22 @@ def _check_permissions_caller_permission(
     `/global/spend/*`), so it must follow the same admin gate as
     `allowed_routes`. Without this gate a non-admin can self-grant capabilities
     they do not hold, including read access to global spend.
+
+    Gate on `model_fields_set` membership, not truthiness. The model-level
+    default of `permissions = {}` (see `GenerateRequestBase.permissions`)
+    means a caller who omits the field from a `/key/generate` body still
+    lands here with a falsy value, and that legitimate omit-case must pass.
+    But an `/key/update` or `/key/regenerate` caller who sends an explicit
+    `permissions: {}` or `permissions: null` is clearing an admin-set
+    capability such as `enable_llm_guard_check`, and the truthiness check
+    used to let that through. `"permissions" in data.model_fields_set` is
+    True only when the field was explicitly present in the request body,
+    so it distinguishes the omit-default from the explicit-clear without
+    relying on falsy-value heuristics.
     """
-    if not permissions:
+    permissions = data.permissions
+    is_explicit = "permissions" in data.model_fields_set
+    if not is_explicit and not permissions:
         return
     if user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN.value:
         return
@@ -840,7 +854,7 @@ async def _common_key_generation_helper(
         team_table=team_table,
     )
     _check_permissions_caller_permission(
-        permissions=data.permissions,
+        data=data,
         user_api_key_dict=user_api_key_dict,
     )
 
@@ -2233,6 +2247,10 @@ async def _validate_update_key_data(
         user_api_key_dict=user_api_key_dict,
     )
     _check_passthrough_routes_caller_permission(
+        data=data,
+        user_api_key_dict=user_api_key_dict,
+    )
+    _check_permissions_caller_permission(
         data=data,
         user_api_key_dict=user_api_key_dict,
     )
@@ -4549,6 +4567,10 @@ async def regenerate_key_fn(
                 user_api_key_dict=user_api_key_dict,
             )
             _check_passthrough_routes_caller_permission(
+                data=data,
+                user_api_key_dict=user_api_key_dict,
+            )
+            _check_permissions_caller_permission(
                 data=data,
                 user_api_key_dict=user_api_key_dict,
             )
