@@ -2367,3 +2367,98 @@ def test_update_ui_settings_writes_audit_log(monkeypatch):
         assert after["disable_custom_api_keys"] is True
     finally:
         app.dependency_overrides.pop(user_api_key_auth, None)
+
+
+class TestBudgetThrottleSettings:
+    """Tests for the global budget_exceeded_throttle_percentage UI setting."""
+
+    def _override(self, user_role):
+        from litellm.proxy._types import UserAPIKeyAuth
+        from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+
+        user = UserAPIKeyAuth(user_id="u", api_key="hashed-key", user_role=user_role)
+        app.dependency_overrides[user_api_key_auth] = lambda: user
+
+    def _clear_override(self):
+        from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+
+        app.dependency_overrides.pop(user_api_key_auth, None)
+
+    def test_get_budget_settings_returns_current_value(self, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr(litellm, "budget_exceeded_throttle_percentage", 0.25)
+        self._override(LitellmUserRoles.PROXY_ADMIN)
+        try:
+            resp = client.get("/get/budget_settings")
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["budget_exceeded_throttle_percentage"] == 0.25
+        finally:
+            self._clear_override()
+
+    def test_update_budget_settings_persists(self, mock_proxy_config, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+        monkeypatch.setattr(litellm, "budget_exceeded_throttle_percentage", None)
+        self._override(LitellmUserRoles.PROXY_ADMIN)
+        try:
+            resp = client.patch(
+                "/update/budget_settings",
+                json={"budget_exceeded_throttle_percentage": 0.1},
+            )
+            assert resp.status_code == 200, resp.text
+            assert litellm.budget_exceeded_throttle_percentage == 0.1
+            assert mock_proxy_config["config"]["litellm_settings"]["budget_exceeded_throttle_percentage"] == 0.1
+            assert mock_proxy_config["save_call_count"]() == 1
+        finally:
+            self._clear_override()
+
+    def test_update_budget_settings_clear(self, mock_proxy_config, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+        monkeypatch.setattr(litellm, "budget_exceeded_throttle_percentage", 0.5)
+        self._override(LitellmUserRoles.PROXY_ADMIN)
+        try:
+            resp = client.patch(
+                "/update/budget_settings",
+                json={"budget_exceeded_throttle_percentage": None},
+            )
+            assert resp.status_code == 200, resp.text
+            assert litellm.budget_exceeded_throttle_percentage is None
+        finally:
+            self._clear_override()
+
+    @pytest.mark.parametrize("bad_value", [0, -0.1, 1.5, True, False])
+    def test_update_budget_settings_rejects_invalid(self, monkeypatch, bad_value):
+        import litellm
+
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+        monkeypatch.setattr(litellm, "budget_exceeded_throttle_percentage", None)
+        self._override(LitellmUserRoles.PROXY_ADMIN)
+        try:
+            resp = client.patch(
+                "/update/budget_settings",
+                json={"budget_exceeded_throttle_percentage": bad_value},
+            )
+            assert resp.status_code == 422, resp.text
+            assert litellm.budget_exceeded_throttle_percentage is None
+        finally:
+            self._clear_override()
+
+    def test_update_budget_settings_rejects_non_admin(self, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+        monkeypatch.setattr(litellm, "budget_exceeded_throttle_percentage", None)
+        self._override(LitellmUserRoles.INTERNAL_USER)
+        try:
+            resp = client.patch(
+                "/update/budget_settings",
+                json={"budget_exceeded_throttle_percentage": 0.1},
+            )
+            assert resp.status_code == 403, resp.text
+            assert litellm.budget_exceeded_throttle_percentage is None
+        finally:
+            self._clear_override()

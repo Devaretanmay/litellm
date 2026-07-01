@@ -4875,6 +4875,30 @@ export const updateInternalUserSettings = async (accessToken: string, settings: 
   }
 };
 
+export const getBudgetSettings = async (accessToken: string) => {
+  try {
+    const data = await apiClient.get(`/get/budget_settings`, { accessToken });
+    return data;
+  } catch (error) {
+    console.error("Failed to fetch budget settings:", error);
+    throw error;
+  }
+};
+
+export const updateBudgetSettings = async (
+  accessToken: string,
+  settings: { budget_exceeded_throttle_percentage: number | null },
+) => {
+  try {
+    const data = await apiClient.patch(`/update/budget_settings`, { accessToken, body: settings });
+    NotificationsManager.success("Budget throttle settings updated successfully");
+    return data;
+  } catch (error) {
+    console.error("Failed to update budget settings:", error);
+    throw error;
+  }
+};
+
 export const fetchOpenAPIRegistry = async (accessToken: string) => {
   try {
     const url = proxyBaseUrl ? `${proxyBaseUrl}/v1/mcp/openapi-registry` : `/v1/mcp/openapi-registry`;

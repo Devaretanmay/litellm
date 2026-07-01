@@ -1,11 +1,12 @@
 #### CRUD ENDPOINTS for UI Settings #####
 import asyncio
 import json
+import math
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
-from pydantic import ConfigDict, ValidationError, create_model
+from pydantic import ConfigDict, ValidationError, create_model, field_validator
 from pydantic.fields import FieldInfo
 
 import litellm
@@ -699,6 +700,136 @@ async def update_default_team_settings(
     )
 
 
+class BudgetThrottleSettings(BaseModel):
+    """
+    Global ``litellm_settings.budget_exceeded_throttle_percentage``: the
+    fraction (0, 1] of a key's configured TPM/RPM that an over-budget key that
+    opted into ``throttle_on_budget_exceeded`` is allowed to keep serving at.
+    ``None`` disables throttling, so an over-budget key is hard-blocked (the
+    safe default).
+    """
+
+    budget_exceeded_throttle_percentage: Optional[float] = Field(
+        default=None,
+        description=(
+            "Fraction (0, 1] of a key's configured TPM/RPM that an over-budget "
+            "key opted into throttle_on_budget_exceeded keeps serving at. "
+            "None hard-blocks over-budget keys (default)."
+        ),
+    )
+
+    @field_validator("budget_exceeded_throttle_percentage", mode="before")
+    @classmethod
+    def _validate_percentage(cls, v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("budget_exceeded_throttle_percentage must be a number in (0, 1] or null")
+        fv = float(v)
+        if not math.isfinite(fv) or not (0 < fv <= 1):
+            raise ValueError("budget_exceeded_throttle_percentage must be a number in (0, 1] or null")
+        return fv
+
+
+async def _update_litellm_scalar_setting(
+    settings_key: str,
+    value: Any,
+    success_message: str,
+    user_api_key_dict: UserAPIKeyAuth,
+) -> dict[str, Any]:
+    """
+    Persist a scalar ``litellm_settings`` value to both the in-memory
+    ``litellm.<settings_key>`` and the DB config, mirroring
+    ``_update_litellm_setting`` for values that are a plain scalar rather than a
+    nested settings object. The key must be listed in
+    ``LITELLM_SETTINGS_SAFE_DB_OVERRIDES`` so the DB value is re-applied on
+    restart.
+    """
+    from litellm.proxy.proxy_server import (
+        create_config_audit_log,
+        proxy_config,
+        store_model_in_db,
+    )
+
+    if store_model_in_db is not True:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Set `'STORE_MODEL_IN_DB='True'` in your env to enable this feature."},
+        )
+
+    config = await proxy_config.get_config()
+    before_value = config.get("litellm_settings", {}).get(settings_key)
+
+    setattr(litellm, settings_key, value)
+
+    if "litellm_settings" not in config:
+        config["litellm_settings"] = {}
+    config["litellm_settings"][settings_key] = value
+
+    await proxy_config.save_config(new_config=config)
+
+    asyncio.create_task(
+        create_config_audit_log(
+            param_name=settings_key,
+            action="updated",
+            before_value=before_value,
+            after_value=value,
+            user_api_key_dict=user_api_key_dict,
+        )
+    )
+
+    return {
+        "message": success_message,
+        "status": "success",
+        "settings": {settings_key: value},
+    }
+
+
+@router.get(
+    "/get/budget_settings",
+    tags=["Budget Settings"],
+    dependencies=[Depends(user_api_key_auth)],
+    response_model=BudgetThrottleSettings,
+)
+async def get_budget_settings(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+) -> BudgetThrottleSettings:
+    """
+    Return the global budget-exceeded throttle percentage currently in effect.
+    """
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
+        raise HTTPException(status_code=403, detail={"error": CommonProxyErrors.not_allowed_access.value})
+
+    return BudgetThrottleSettings(
+        budget_exceeded_throttle_percentage=litellm.budget_exceeded_throttle_percentage,
+    )
+
+
+@router.patch(
+    "/update/budget_settings",
+    tags=["Budget Settings"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def update_budget_settings(
+    settings: BudgetThrottleSettings,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+) -> dict[str, Any]:
+    """
+    Set the global ``budget_exceeded_throttle_percentage``. Only proxy admins may
+    change it: it converts an admin-imposed hard budget block into a soft
+    throttle, so it is a budget-enforcement control.
+    """
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
+        raise HTTPException(status_code=403, detail={"error": CommonProxyErrors.not_allowed_access.value})
+
+    return await _update_litellm_scalar_setting(
+        settings_key="budget_exceeded_throttle_percentage",
+        value=settings.budget_exceeded_throttle_percentage,
+        success_message="Budget throttle settings updated successfully",
+        user_api_key_dict=user_api_key_dict,
+    )
+
+
 @router.get(
     "/get/sso_settings",
     tags=["SSO Settings"],
@@ -1181,7 +1312,7 @@ UI_SETTINGS_CACHE_KEY = "ui_settings:settings_dict"
 UI_SETTINGS_CACHE_TTL = 600  # 10 minutes
 
 
-async def get_ui_settings_cached() -> Dict[str, Any]:
+async def get_ui_settings_cached() -> dict[str, Any]:
     """
     Return the persisted UI settings dict, using DualCache for reads.
 

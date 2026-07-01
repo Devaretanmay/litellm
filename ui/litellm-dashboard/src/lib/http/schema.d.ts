@@ -4030,6 +4030,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/get/budget_settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Budget Settings
+         * @description Return the global budget-exceeded throttle percentage currently in effect.
+         */
+        get: operations["get_budget_settings_get_budget_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/get/config/callbacks": {
         parameters: {
             query?: never;
@@ -6502,6 +6522,7 @@ export interface paths {
          *     - guardrails: Optional[List[str]] - List of active guardrails for the key
          *     - policies: Optional[List[str]] - List of policy names to apply to the key. Policies define guardrails, conditions, and inheritance rules.
          *     - disable_global_guardrails: Optional[bool] - Whether to disable global guardrails for the key.
+         *     - throttle_on_budget_exceeded: Optional[bool] - When the key exceeds its max_budget, throttle its tpm/rpm to the global budget_exceeded_throttle_percentage instead of blocking the key entirely.
          *     - permissions: Optional[dict] - key-specific permissions. Currently just used for turning off pii masking (if connected). Example - {"pii": false}
          *     - model_max_budget: Optional[Dict[str, BudgetConfig]] - Model-specific budgets {"gpt-4": {"budget_limit": 0.0005, "time_period": "30d"}}}. IF null or {} then no model specific budget.
          *     - model_rpm_limit: Optional[dict] - key-specific model rpm limit. Example - {"text-davinci-002": 1000, "gpt-3.5-turbo": 1000}. IF null or {} then no model specific rpm limit.
@@ -6901,6 +6922,7 @@ export interface paths {
          *     - guardrails: Optional[List[str]] - List of active guardrails for the key
          *     - policies: Optional[List[str]] - List of policy names to apply to the key. Policies define guardrails, conditions, and inheritance rules.
          *     - disable_global_guardrails: Optional[bool] - Whether to disable global guardrails for the key.
+         *     - throttle_on_budget_exceeded: Optional[bool] - When the key exceeds its max_budget, throttle its tpm/rpm to the global budget_exceeded_throttle_percentage instead of blocking the key entirely.
          *     - prompts: Optional[List[str]] - List of prompts that the key is allowed to use.
          *     - blocked: Optional[bool] - Whether the key is blocked
          *     - aliases: Optional[dict] - Model aliases for the key - [Docs](https://litellm.vercel.app/docs/proxy/virtual_keys#model-aliases)
@@ -14105,6 +14127,28 @@ export interface paths {
          *     will be rejected with a 403.
          */
         patch: operations["toolset_mcp_route_toolset__toolset_name__mcp_patch"];
+        trace?: never;
+    };
+    "/update/budget_settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Budget Settings
+         * @description Set the global ``budget_exceeded_throttle_percentage``. Only proxy admins may
+         *     change it: it converts an admin-imposed hard budget block into a soft
+         *     throttle, so it is a budget-enforcement control.
+         */
+        patch: operations["update_budget_settings_update_budget_settings_patch"];
         trace?: never;
     };
     "/update/default_team_settings": {
@@ -21334,6 +21378,21 @@ export interface components {
             budgets: string[];
         };
         /**
+         * BudgetThrottleSettings
+         * @description Global ``litellm_settings.budget_exceeded_throttle_percentage``: the
+         *     fraction (0, 1] of a key's configured TPM/RPM that an over-budget key that
+         *     opted into ``throttle_on_budget_exceeded`` is allowed to keep serving at.
+         *     ``None`` disables throttling, so an over-budget key is hard-blocked (the
+         *     safe default).
+         */
+        BudgetThrottleSettings: {
+            /**
+             * Budget Exceeded Throttle Percentage
+             * @description Fraction (0, 1] of a key's configured TPM/RPM that an over-budget key opted into throttle_on_budget_exceeded keeps serving at. None hard-blocks over-budget keys (default).
+             */
+            budget_exceeded_throttle_percentage?: number | null;
+        };
+        /**
          * BulkTeamMemberAddRequest
          * @description Request for bulk team member addition
          */
@@ -23681,6 +23740,8 @@ export interface components {
             tags?: string[] | null;
             /** Team Id */
             team_id?: string | null;
+            /** Throttle On Budget Exceeded */
+            throttle_on_budget_exceeded?: boolean | null;
             /** Tpm Limit */
             tpm_limit?: number | null;
             /** Tpm Limit Type */
@@ -23817,6 +23878,8 @@ export interface components {
             tags?: string[] | null;
             /** Team Id */
             team_id?: string | null;
+            /** Throttle On Budget Exceeded */
+            throttle_on_budget_exceeded?: boolean | null;
             /** Token */
             token?: string | null;
             /** Token Id */
@@ -28126,6 +28189,8 @@ export interface components {
             team_id?: string | null;
             /** Teams */
             teams?: unknown[] | null;
+            /** Throttle On Budget Exceeded */
+            throttle_on_budget_exceeded?: boolean | null;
             /** Token */
             token?: string | null;
             /** Token Id */
@@ -29749,6 +29814,8 @@ export interface components {
             tags?: string[] | null;
             /** Team Id */
             team_id?: string | null;
+            /** Throttle On Budget Exceeded */
+            throttle_on_budget_exceeded?: boolean | null;
             /** Tpm Limit */
             tpm_limit?: number | null;
             /** Tpm Limit Type */
@@ -31692,6 +31759,8 @@ export interface components {
             temp_budget_expiry?: string | null;
             /** Temp Budget Increase */
             temp_budget_increase?: number | null;
+            /** Throttle On Budget Exceeded */
+            throttle_on_budget_exceeded?: boolean | null;
             /** Tpm Limit */
             tpm_limit?: number | null;
             /** Tpm Limit Type */
@@ -39430,6 +39499,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_budget_settings_get_budget_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetThrottleSettings"];
                 };
             };
         };
@@ -50548,6 +50637,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_budget_settings_update_budget_settings_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BudgetThrottleSettings"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

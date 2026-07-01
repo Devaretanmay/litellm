@@ -14,7 +14,13 @@ import {
   Switch,
 } from "@tremor/react";
 import { TabPanel, TabPanels, TabGroup, TabList, Tab } from "@tremor/react";
-import { getGeneralSettingsCall, updateConfigFieldSetting, deleteConfigFieldSetting } from "./networking";
+import {
+  getGeneralSettingsCall,
+  updateConfigFieldSetting,
+  deleteConfigFieldSetting,
+  getBudgetSettings,
+  updateBudgetSettings,
+} from "./networking";
 import { InputNumber } from "antd";
 import { TrashIcon, CheckCircleIcon } from "@heroicons/react/outline";
 
@@ -37,6 +43,8 @@ interface generalSettingsItem {
 
 const GeneralSettings: React.FC<GeneralSettingsPageProps> = ({ accessToken, userRole, userID }) => {
   const [generalSettings, setGeneralSettings] = useState<generalSettingsItem[]>([]);
+  const [budgetThrottlePct, setBudgetThrottlePct] = useState<number | null>(null);
+  const [savingBudgetThrottle, setSavingBudgetThrottle] = useState<boolean>(false);
 
   useEffect(() => {
     if (!accessToken) {
@@ -46,7 +54,28 @@ const GeneralSettings: React.FC<GeneralSettingsPageProps> = ({ accessToken, user
       let general_settings = data;
       setGeneralSettings(general_settings);
     });
+    getBudgetSettings(accessToken)
+      .then((data) => {
+        setBudgetThrottlePct(data?.budget_exceeded_throttle_percentage ?? null);
+      })
+      .catch(() => {});
   }, [accessToken]);
+
+  const handleSaveBudgetThrottle = async (value: number | null) => {
+    if (!accessToken) {
+      return;
+    }
+    setSavingBudgetThrottle(true);
+    try {
+      await updateBudgetSettings(accessToken, {
+        budget_exceeded_throttle_percentage: value,
+      });
+      setBudgetThrottlePct(value);
+    } catch (error) {
+    } finally {
+      setSavingBudgetThrottle(false);
+    }
+  };
 
   const handleInputChange = (fieldName: string, newValue: any) => {
     // Update the value in the state
@@ -184,6 +213,29 @@ const GeneralSettings: React.FC<GeneralSettingsPageProps> = ({ accessToken, user
                     ))}
                 </TableBody>
               </Table>
+            </Card>
+            <Card className="mt-4">
+              <Text className="font-semibold">Budget-exceeded throttle</Text>
+              <p style={{ fontSize: "0.75rem", color: "#808080" }} className="mt-1">
+                Fraction (0 to 1] of a key&apos;s configured TPM/RPM that an over-budget key opted into &quot;Throttle
+                on budget exceeded&quot; keeps serving at. Leave empty to hard-block over-budget keys.
+              </p>
+              <div className="flex items-center gap-2 mt-3">
+                <InputNumber
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  placeholder="e.g. 0.1"
+                  value={budgetThrottlePct}
+                  onChange={(newValue) => setBudgetThrottlePct(newValue)}
+                />
+                <Button loading={savingBudgetThrottle} onClick={() => handleSaveBudgetThrottle(budgetThrottlePct)}>
+                  Update
+                </Button>
+                <Icon icon={TrashIcon} color="red" onClick={() => handleSaveBudgetThrottle(null)}>
+                  Reset
+                </Icon>
+              </div>
             </Card>
           </TabPanel>
         </TabPanels>
